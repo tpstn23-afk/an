@@ -810,8 +810,13 @@ function fitFilteredCandidateBounds(){
   setTimeout(()=>{ if(!fitRecordListBounds(fs) && selectedId) fitCandidateBoundary(selectedId); },160);
 }
 function onScoreFilterChange(){
+  // 최소점수 필터를 바꾸면 필터 후 선택된 후보지 1개 부지경계로 바로 확대한다.
+  // 기존처럼 필터 결과 전체 extent로 가는 것이 아니라, 선택 후보지 중심으로 들어간다.
   renderAll();
-  setTimeout(fitFilteredCandidateBounds,260);
+  setTimeout(()=>{
+    if(selectedId) fitCandidateBoundary(selectedId);
+    else fitFilteredCandidateBounds();
+  },320);
 }
 
 function highlightKakao(id){
@@ -1071,8 +1076,47 @@ function renderTable(){
  const fs=getFiltered();
  table.innerHTML=`<div style="overflow:auto;max-height:650px"><table><tr><th>구역</th><th>수직구</th><th>후보지</th><th>면적㎡</th><th>소유</th><th>건물</th><th>철도m</th><th>지장물</th><th>100점</th><th>설치원점수</th><th>Gate</th><th>판정</th></tr>${fs.map(r=>`<tr onclick="selectCandidate('${r.ID}',true)" class="${r.ID===selectedId?'active':''}"><td>${areaKr(r)}</td><td>${safe(r.MAIN_SHAFT||r.SHAFT)}</td><td>${safe(r.CAND_NM)}</td><td class="numeric">${fmt(r.AREA_M2_RAW,1)}</td><td>${safe(r.OWN_CLASS)}</td><td>${safe(r.BLD_CLASS)}</td><td class="numeric">${safe(r.RAIL_D)}</td><td>${replaceUtil(r.L_BIGUTIL)} / ${replaceUtil(r.L_UTIL)}</td><td class="numeric"><b>${score100Text(r)}</b></td><td class="numeric">${safe(r.TOTAL)}/35</td><td>${safe(r.GATE)}</td><td>${jLabel(r)}</td></tr>`).join('')}</table></div>`;
 }
-function selectCandidate(id,scrollToTop){const r=DATA[id];if(!r)return;selectedId=id;renderList();renderDetail(r);renderScore(r);renderMap(r);renderCriteria();renderChecklist(r);renderTable();if(scrollToTop)document.querySelector('.main').scrollIntoView({behavior:'smooth',block:'start'});}
-function openTab(id){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));[...document.querySelectorAll('.tab')].find(t=>t.getAttribute('onclick')?.includes(`'${id}'`))?.classList.add('active');document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));document.getElementById(id).classList.add('active');if(id==='map'&&selectedId){renderMap(DATA[selectedId]);setTimeout(()=>{if(KMAP){try{KMAP.relayout();}catch(e){}const o=KOVERLAYS[selectedId];if(o&&o.pos)KMAP.setCenter(o.pos);}},80);}if(id==='checklist'&&selectedId)renderChecklist(DATA[selectedId]);if(id==='table')renderTable();}
+function activeTabId(){
+  const p=document.querySelector('.tab-panel.active');
+  return p ? p.id : 'detail';
+}
+function selectCandidate(id,scrollToTop,zoomToBoundary){
+  const r=DATA[id];
+  if(!r)return;
+  selectedId=id;
+  renderList();
+  renderDetail(r);
+  renderScore(r);
+  renderMap(r);
+  renderCriteria();
+  renderChecklist(r);
+  renderTable();
+  if(scrollToTop)document.querySelector('.main').scrollIntoView({behavior:'smooth',block:'start'});
+
+  // 핵심 수정: 후보지 카드/표/마커를 누르면 위치도 탭으로 이동하고 해당 부지경계로 자동 확대한다.
+  // 초기 로딩처럼 원치 않는 경우만 세 번째 인자 false로 막는다.
+  if(zoomToBoundary!==false){
+    openTab('map');
+    setTimeout(()=>fitCandidateBoundary(id),360);
+  }
+}
+function openTab(id){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  [...document.querySelectorAll('.tab')].find(t=>t.getAttribute('onclick')?.includes(`'${id}'`))?.classList.add('active');
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  if(id==='map'&&selectedId){
+    renderMap(DATA[selectedId]);
+    setTimeout(()=>{
+      if(KMAP){
+        try{KMAP.relayout();}catch(e){}
+        fitCandidateBoundary(selectedId);
+      }
+    },160);
+  }
+  if(id==='checklist'&&selectedId)renderChecklist(DATA[selectedId]);
+  if(id==='table')renderTable();
+}
 function renderAll(){
   const fs=getFiltered();
   if(selectedId && !fs.some(r=>r.ID===selectedId)) selectedId = fs[0]?.ID || null;
@@ -1099,7 +1143,7 @@ function init(){
   let first=null;
   if(URL_INITIAL_ID && DATA[URL_INITIAL_ID] && filtered.some(r=>r.ID===URL_INITIAL_ID)) first=DATA[URL_INITIAL_ID];
   if(!first) first=filtered[0]||records[0];
-  if(first) selectCandidate(first.ID,false);
+  if(first) selectCandidate(first.ID,false,false);
   renderCriteria();
 }
 init();
