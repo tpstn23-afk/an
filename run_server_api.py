@@ -44,6 +44,7 @@ VWORLD_STDR_YEAR = _os.environ.get("VWORLD_STDR_YEAR", "2026")                # 
 NED_BASE = "https://api.vworld.kr/ned/data"
 ADDR_BASE = "https://api.vworld.kr/req/address"
 WFS_BASE = "https://api.vworld.kr/req/wfs"
+DATA_BASE = "https://api.vworld.kr/req/data"
 HTTP_TIMEOUT = 8
 
 MIN_AREA_M2 = 500.0
@@ -251,6 +252,37 @@ def shape_info_from_geojson(geometry):
     hull = convex_hull(xy)
     short_w, long_w = min_area_rect_wh(hull)
     return short_w, long_w, compact
+
+
+def find_parcel_by_address_text(addr):
+    """
+    지오코더(geocode_address)는 표기에 민감해서 흔히 실패합니다.
+    대신 연속지적도 데이터(LP_PA_CBND_BUBUN)의 addr 속성에서 직접 텍스트로
+    찾는 방식이라 "강동구 성내동 160-2"처럼 시/도를 빼거나 띄어쓰기가
+    살짝 달라도 더 잘 찾습니다. 여러 건이 매칭되면 addr이 가장 긴 것
+    (더 구체적인 지번)을 우선합니다.
+    """
+    url = DATA_BASE + "?" + _qs(
+        service="data", request="GetFeature", data="LP_PA_CBND_BUBUN",
+        key=VWORLD_KEY, domain=VWORLD_DOMAIN, format="json",
+        attrFilter="addr:like:{}".format(addr), size="10", geometry="true")
+    try:
+        data = json.loads(_get(url))
+        fc = data.get("response", {}).get("result", {}).get("featureCollection", {})
+        feats = fc.get("features") or []
+    except Exception:
+        return None
+    if not feats:
+        return None
+    feats.sort(key=lambda f: len(f.get("properties", {}).get("addr", "")), reverse=True)
+    f = feats[0]
+    props = f.get("properties", {})
+    return {
+        "pnu": props.get("pnu", ""),
+        "jibun": props.get("jibun", ""),
+        "addr": props.get("addr", ""),
+        "geometry": f.get("geometry"),
+    }
 
 
 def geocode_address(addr):
@@ -478,6 +510,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/search":
             self._handle_search(parsed)
             return
+        if parsed.path == "/api/parcel":
+            self._handle_parcel(parsed)
+            return
         if parsed.path == "/api/landinfo":
             self._handle_landinfo(parsed)
             return
@@ -485,6 +520,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _key_ok(self):
         return bool(VWORLD_KEY) and "여기에" not in VWORLD_KEY
+
+    def _handle_parcel(self, parsed):
+        # 카카오맵 클릭 좌표로 바로 필지를 찾습니다(주소 텍스트 변환 단계가 없어
+        # 지오코더 표기 이슈에 영향받지 않고, 점수는 계산하지 않습니다 - 지번/건축물 정보만 표시).
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            lon = float(qs.get("lon", [""])[0])
+            lat = float(qs.get("lat", [""])[0])
+        except (TypeError, ValueError):
+            self._send_json({"error": "lon/lat 파라미터가 올바르지 않습니다."}, 400)
+            return
+        if not self._key_ok():
+            self._send_json({"error": "run_server_api.py 의 VWORLD_KEY가 아직 설정되지 않았습니다."}, 500)
+            return
+        try:
+            parcel = get_parcel_by_point(lon, lat)
+            if not parcel or not parcel.get("pnu"):
+                self._send_json({"error": "해당 위치의 필지를 찾지 못했습니다(도로/하천 등일 수 있음)."}, 404)
+                return
+            pnu = re.sub(r"\D", "", parcel["pnu"])
+            land = fetch_land(pnu)
+            building = fetch_building(pnu)
+            self._send_json({
+                "pnu": pnu, "jibun": parcel.get("jibun"), "addr": parcel.get("addr"),
+                "land": land, "building": building,
+            }, 200)
+        except Exception as e:
+            self._send_json({"error": "서버 처리 중 오류: {}".format(e)}, 500)
 
     def _handle_search(self, parsed):
         qs = urllib.parse.parse_qs(parsed.query)
@@ -496,12 +559,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "run_server_api.py 의 VWORLD_KEY가 아직 설정되지 않았습니다."}, 500)
             return
         try:
-            xy = geocode_address(addr)
-            if not xy:
-                self._send_json({"error": "주소를 찾지 못했습니다. 지번(예: 강남구 개포동 171) "
-                                           "또는 도로명주소로 다시 입력해보세요."}, 404)
-                return
-            parcel = get_parcel_by_point(xy[0], xy[1])
+            parcel = find_parcel_by_address_text(addr)
+            if not parcel or not parcel.get("pnu"):
+                xy = geocode_address(addr)
+                if not xy:
+                    self._send_json({"error": "주소를 찾지 못했습니다. 지번(예: 강남구 개포동 171) "
+                                               "또는 도로명주소로 다시 입력해보세요. "
+                                               "시/도를 빼고 '구 동 번지'만 입력해도 됩니다."}, 404)
+                    return
+                parcel = get_parcel_by_point(xy[0], xy[1])
             if not parcel or not parcel.get("pnu"):
                 self._send_json({"error": "해당 위치의 필지를 찾지 못했습니다(도로/하천 등일 수 있음)."}, 404)
                 return
