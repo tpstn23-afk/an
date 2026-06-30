@@ -699,7 +699,14 @@ function ensureKakaoMap(){
   KMAP.addControl(new kakao.maps.ZoomControl(),kakao.maps.ControlPosition.RIGHT);
   KMAP.setMapTypeId(kakao.maps.MapTypeId.HYBRID);
   cont.addEventListener('contextmenu', e=>e.preventDefault()); // 브라우저 기본 우클릭 메뉴 차단
+  let LAST_RIGHTCLICK_TS=0;
   kakao.maps.event.addListener(KMAP,'rightclick',function(e){
+    // 카카오맵은 연속 우클릭(더블 우클릭)을 줌아웃 제스처로 인식합니다.
+    // preventMap()으로 그 기본 동작을 막고, 너무 빠른 연속 클릭은 한 번으로 처리합니다.
+    try{ kakao.maps.event.preventMap(); }catch(err){}
+    const now=Date.now();
+    if(now-LAST_RIGHTCLICK_TS<350) return;
+    LAST_RIGHTCLICK_TS=now;
     const lat=e.latLng.getLat(), lon=e.latLng.getLng();
     onMapClickQueryParcel(lon, lat);
   });
@@ -957,7 +964,11 @@ function officialBuildingCards(building){
    <tr><th>대지면적</th><td>${b.대지면적?fmt(b.대지면적,1)+'㎡':'-'}</td><th>연면적</th><td>${b.연면적?fmt(b.연면적,1)+'㎡':'-'}</td></tr>
    <tr><th>건축면적</th><td>${b.건축면적?fmt(b.건축면적,1)+'㎡':'-'}</td><th>높이</th><td>${b.높이?fmt(b.높이,1)+'m':'-'}</td></tr>
    <tr><th>건폐율</th><td>${b.건폐율?fmt(b.건폐율,2)+'%':'-'}</td><th>용적률</th><td>${b.용적률?fmt(b.용적률,2)+'%':'-'}</td></tr>
-   <tr><th>층수(지상/지하)</th><td>${htmlEscape(b.지상층수||'-')} / ${htmlEscape(b.지하층수||'-')}</td><th>사용승인일</th><td>${fmtDate8(b.사용승인일)}</td></tr></table></div>`).join('');
+   <tr><th>층수(지상/지하)</th><td>${htmlEscape(b.지상층수||'-')} / ${htmlEscape(b.지하층수||'-')}</td><th>사용승인일</th><td>${fmtDate8(b.사용승인일)}</td></tr>
+   <tr><th>세대수</th><td>${htmlEscape(b.세대수||'-')}</td><th>주차대수</th><td>${htmlEscape(b.주차대수||'-')}</td></tr></table>
+   ${(!b.세대수 && !b.주차대수 && b._raw) ? `<details style="margin-top:6px"><summary class="footer-note" style="cursor:pointer">세대수/주차대수가 비어있음 — 원본 응답 필드 보기(디버그용)</summary>
+     <pre style="font-size:11px;white-space:pre-wrap;background:#f8fafc;padding:8px;border-radius:8px;margin-top:4px">${htmlEscape(JSON.stringify(b._raw,null,1))}</pre></details>` : ''}
+   </div>`).join('');
 }
 function officialCostEstimate(building){
   // 원가법 참고치: 건물금액 = 재조달원가(구조별 ㎡단가) × 연면적 × 잔가율
@@ -1052,7 +1063,52 @@ function renderClickHistory(){
   }</table>`;
 }
 
+// fetch 후 JSON으로 안전하게 파싱. 서버가 HTML(404 페이지 등)을 돌려주면
+// res.json()이 "Unexpected token '<'" 같은 알아듣기 힘든 에러를 던지는데,
+// 그 대신 "이 API 경로가 서버에 없습니다(구버전 run_server_api.py일 수 있음)"
+// 처럼 원인을 바로 알 수 있는 메시지로 바꿔줍니다.
+async function fetchJSON(url){
+  const res = await fetch(url);
+  const raw = await res.text();
+  let data;
+  try{
+    data = JSON.parse(raw);
+  }catch(e){
+    const looksHtml = raw.trim().startsWith('<');
+    throw new Error(
+      looksHtml
+        ? `서버가 JSON이 아닌 페이지(HTML)를 반환했습니다 (status ${res.status}). `
+          + `run_server_api.py가 최신 버전인지(이 API 경로가 있는지) 확인하세요. 요청: ${url}`
+        : `서버 응답을 해석할 수 없습니다 (status ${res.status}): ${raw.slice(0,200)}`
+    );
+  }
+  if(!res.ok || data.error) throw new Error(data.error || `서버 응답 ${res.status}`);
+  return data;
+}
 let CLICK_MARKER=null;
+let LIVE_BOUNDARY_POLY=null;
+function clearLiveBoundary(){
+  if(LIVE_BOUNDARY_POLY){ try{LIVE_BOUNDARY_POLY.forEach(p=>p.setMap(null));}catch(e){} LIVE_BOUNDARY_POLY=null; }
+}
+function drawLiveBoundary(geometry){
+  // 기존 평가 DB에 없는 필지를 실시간 조회했을 때, 그 필지 경계를 빨간 폴리곤으로
+  // 그리고 지도를 그 경계에 맞춰 확대합니다. (DATA에 있는 후보는 fitCandidateBoundary가
+  // 기존 구역 오버레이를 그대로 쓰므로 이 함수를 쓰지 않습니다.)
+  clearLiveBoundary();
+  if(!KMAP || !geometry) return;
+  const gtype=geometry.type, coords=geometry.coordinates;
+  let rings=[];
+  if(gtype==='Polygon' && coords && coords[0]) rings=[coords[0]];
+  else if(gtype==='MultiPolygon' && coords) rings=coords.map(poly=>poly && poly[0]).filter(Boolean);
+  if(!rings.length) return;
+  const bounds=new kakao.maps.LatLngBounds();
+  LIVE_BOUNDARY_POLY = rings.map(ring=>{
+    const path=ring.map(_ll);
+    path.forEach(p=>bounds.extend(p));
+    return new kakao.maps.Polygon({map:KMAP,path,strokeWeight:3,strokeColor:'#dc2626',strokeOpacity:0.95,fillColor:'#dc2626',fillOpacity:0.2,zIndex:30});
+  });
+  try{ KMAP.setBounds(bounds); }catch(e){}
+}
 async function onMapClickQueryParcel(lon, lat){
   const el=document.getElementById('mapClickResult');
   if(!el) return;
@@ -1065,31 +1121,36 @@ async function onMapClickQueryParcel(lon, lat){
   el.innerHTML = `<div class="official-loading">조회 중입니다... (${lat.toFixed(6)}, ${lon.toFixed(6)})</div>`;
   try{
     // 1) 좌표 -> PNU만 가볍게 조회
-    const pres = await fetch(`/api/pnu?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}`);
-    const pdata = await pres.json();
-    if(!pres.ok || pdata.error) throw new Error(pdata.error || `서버 응답 ${pres.status}`);
+    const pdata = await fetchJSON(`/api/pnu?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}`);
     const pnu = String(pdata.pnu||'').replace(/\D/g,'');
 
-    // 2) 이미 평가해둔 후보(DATA)에 있으면 그 결과를 그대로 사용
+    // 2) 이미 평가해둔 후보(DATA)에 있으면 그 결과를 그대로 사용 + 경계로 확대
     const existingId = PNU_INDEX[pnu];
     if(existingId && DATA[existingId]){
       const r = DATA[existingId];
+      clearLiveBoundary(); // 기존 후보는 구역 오버레이 자체가 경계를 보여주므로 임시 빨간 경계는 지움
       renderClickedExisting(el, r);
       addClickHistory({
         time:new Date().toLocaleString('ko-KR'), pnu, addr:safe(r.CAND_NM)||pdata.addr||pdata.jibun||'',
         jimok:safe(r.JIMOK), scoreText:`${score100Text(r)}점 (${safe(r.TOTAL)}/35)`, source:'data'
       });
-      // 화면 위쪽 "선택 후보지" 요약 패널(mapDetail)도 우클릭한 후보로 갱신.
-      // (이전엔 selectedId만 바꾸고 화면을 안 새로고침해서, 위쪽엔 예전 후보가
-      //  그대로 남아있고 아래 우클릭 결과만 바뀌는 불일치가 있었습니다.)
+      // 화면 위쪽 "선택 후보지" 요약 패널도 갱신하고, 그 후보 경계로 지도 확대.
       selectCandidate(existingId, false, false);
+      fitCandidateBoundary(existingId);
+      // 브이월드 공식자료가 baked-in 안 돼 있으면(OFFICIAL_API_SCOPE='top'이라 상위
+      // 후보만 채워진 경우 등) 공시지가 등이 비어 보이므로, 그때만 실시간으로 보충 조회.
+      if(!r.OFFICIAL){
+        try{
+          const live = await fetchJSON(`/api/parcel?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}`);
+          renderClickedExisting(el, r, live);
+        }catch(e2){ /* 보충 조회 실패해도 기존 35점 결과는 이미 표시돼 있으니 무시 */ }
+      }
       return;
     }
 
-    // 3) 기존 평가에 없는 자리(유역경계 밖 등) -> 실시간 VWorld 조회로 폴백
-    const fres = await fetch(`/api/parcel?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}`);
-    const fdata = await fres.json();
-    if(!fres.ok || fdata.error) throw new Error(fdata.error || `서버 응답 ${fres.status}`);
+    // 3) 기존 평가에 없는 자리(유역경계 밖 등) -> 실시간 VWorld 조회로 폴백 + 경계 표시
+    const fdata = await fetchJSON(`/api/parcel?lon=${encodeURIComponent(lon)}&lat=${encodeURIComponent(lat)}`);
+    drawLiveBoundary(fdata.geometry);
     el.innerHTML = `<div class="official-toolbar"><span class="ts">PNU ${htmlEscape(fdata.pnu)} · ${htmlEscape(fdata.addr||fdata.jibun||'')} · 기존 평가에 없는 필지(실시간 조회)</span></div>
       <div class="section" style="border-top:0;padding-top:0"><h2>약식 평가(20점)</h2>${adhocScoreCard(fdata.score)}</div>
       <div class="section"><h2>토지 현황</h2><table>${officialLandRows(fdata.land)}</table></div>
@@ -1103,8 +1164,8 @@ async function onMapClickQueryParcel(lon, lat){
       run_server_api.py가 이 HTML과 같은 폴더(또는 같은 서버)에서 실행 중인지, VWORLD_KEY가 채워졌는지 확인하세요.</div>`;
   }
 }
-function renderClickedExisting(el, r){
-  const off = r.OFFICIAL;
+function renderClickedExisting(el, r, live){
+  const off = r.OFFICIAL || live; // baked 공식자료가 없으면 방금 실시간으로 보충한 데이터를 대신 씀
   el.innerHTML = `<div class="official-toolbar"><span class="ts">PNU ${htmlEscape(safe(r.PNU))} · ${htmlEscape(safe(r.CAND_NM))} · 기존 평가 결과(35점 전체)</span></div>
     <table><tr><th>구분</th><td>${areaKr(r)} / ${safe(r.MAIN_SHAFT||r.SHAFT)}</td></tr>
     <tr><th>면적</th><td>${fmt(r.AREA_M2_RAW,1)}㎡</td></tr>
@@ -1123,18 +1184,16 @@ function renderClickedExisting(el, r){
     </div></div>
     ${off ? `<div class="section"><h2>토지 현황(브이월드)</h2><table>${officialLandRows(off.land)}</table></div>
      <div class="section"><h2>건축물 현황(브이월드)</h2>${officialBuildingCards(off.building)}</div>` :
-     `<p class="footer-note">이 후보지는 브이월드 공식자료가 baked-in 되어 있지 않습니다(OFFICIAL_API_SCOPE='top'이면 상위 후보만 채워짐).</p>`}`;
+     `<p class="footer-note">브이월드 공식자료 조회 중이거나 실패했습니다. 잠시 후 다시 우클릭해보세요.</p>`}`;
 }
 async function runAdhocSearch(){
   const addr = (document.getElementById('adhocAddrInput').value||'').trim();
   if(!addr){ adhocResult.innerHTML = '<p class="footer-note">지번 또는 주소를 입력하세요.</p>'; return; }
   adhocResult.innerHTML = '<div class="official-loading">조회 중입니다... (run_server_api.py가 실행 중이어야 합니다)</div>';
   try{
-    const res = await fetch(`/api/search?addr=${encodeURIComponent(addr)}`);
-    const data = await res.json();
-    if(!res.ok || data.error) throw new Error(data.error || `서버 응답 ${res.status}`);
+    const data = await fetchJSON(`/api/search?addr=${encodeURIComponent(addr)}`);
     adhocResult.innerHTML = `<div class="official-toolbar"><span class="ts">PNU ${htmlEscape(data.pnu)} · ${htmlEscape(data.addr||data.jibun||'')}</span></div>
-      <div class="section" style="border-top:0;padding-top:0"><h2>약식 평가(16점)</h2>${adhocScoreCard(data.score)}</div>
+      <div class="section" style="border-top:0;padding-top:0"><h2>약식 평가(20점)</h2>${adhocScoreCard(data.score)}</div>
       <div class="section"><h2>토지 현황</h2><table>${officialLandRows(data.land)}</table></div>
       <div class="section"><h2>건축물 현황</h2>${officialBuildingCards(data.building)}</div>`;
   }catch(e){

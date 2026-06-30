@@ -475,6 +475,16 @@ def fetch_land(pnu):
     return out
 
 
+def _t_any(node, tags):
+    """여러 후보 태그명 중 처음으로 값이 있는 걸 반환. VWorld 응답의 정확한
+    필드명을 100% 확신할 수 없는 항목(세대수·주차대수 등)에 사용합니다."""
+    for tag in tags:
+        v = _t(node, tag)
+        if v:
+            return v
+    return ""
+
+
 def fetch_building(pnu):
     url = NED_BASE + "/getBuildingUse?" + _qs(
         numOfRows="100", format="xml", key=VWORLD_KEY,
@@ -485,8 +495,8 @@ def fetch_building(pnu):
         if total <= 0:
             return {"_empty": True}
         buildings = []
-        for node in root.findall("./fields/field"):
-            buildings.append({
+        for i, node in enumerate(root.findall("./fields/field")):
+            b = {
                 "주용도": _t(node, "mainPrposCodeNm"),
                 "세부용도": _t(node, "detailPrposCodeNm"),
                 "건물명": _t(node, "buldNm"),
@@ -502,7 +512,19 @@ def fetch_building(pnu):
                 "사용승인일": _t(node, "useConfmDe"),
                 "허가일": _t(node, "prmisnDe"),
                 "동명칭": _t(node, "buldDongNm"),
-            })
+                # 세대수·주차대수: VWorld 응답의 정확한 태그명이 불확실해서
+                # 흔히 쓰이는 후보들을 다 시도합니다. 그래도 비어있으면
+                # 이 NED API 응답 자체에 그 정보가 없는 것입니다.
+                "세대수": _t_any(node, ["hhldCo", "houseHoldCo", "hsldCo", "totHhldCo"]),
+                "주차대수": _t_any(node, ["indrMechUtcnt", "totPkngCnt", "pkngCnt", "parkingLotCo",
+                                       "indrAutoUtcnt", "oudrAutoUtcnt", "oudrMechUtcnt"]),
+            }
+            if i == 0:
+                # 첫 동(棟)에 한해 실제 응답의 모든 태그명/값을 같이 담아둡니다.
+                # 세대수·주차대수가 위에서 빈 값으로 나오면, 이 _raw로 실제
+                # 태그명이 뭔지 확인해서 후보 목록에 추가하면 됩니다.
+                b["_raw"] = {child.tag: (child.text or "").strip() for child in node}
+            buildings.append(b)
         return {"buildings": buildings}
     except Exception as e:
         return {"_err": "건축물 조회 실패: {}".format(e)}
@@ -660,6 +682,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({
                 "pnu": pnu, "jibun": parcel.get("jibun"), "addr": parcel.get("addr"),
                 "land": land, "building": building, "score": score,
+                "geometry": parcel.get("geometry"),
             }, 200)
         except Exception as e:
             self._send_json({"error": "서버 처리 중 오류: {}".format(e)}, 500)
