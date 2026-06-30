@@ -693,7 +693,8 @@ function ensureKakaoMap(){
   KMAP.addControl(new kakao.maps.MapTypeControl(),kakao.maps.ControlPosition.TOPRIGHT);
   KMAP.addControl(new kakao.maps.ZoomControl(),kakao.maps.ControlPosition.RIGHT);
   KMAP.setMapTypeId(kakao.maps.MapTypeId.HYBRID);
-  kakao.maps.event.addListener(KMAP,'click',function(e){
+  cont.addEventListener('contextmenu', e=>e.preventDefault()); // 브라우저 기본 우클릭 메뉴 차단
+  kakao.maps.event.addListener(KMAP,'rightclick',function(e){
     const lat=e.latLng.getLat(), lon=e.latLng.getLng();
     onMapClickQueryParcel(lon, lat);
   });
@@ -877,7 +878,7 @@ function buildMapSkeletonOnce(){
   map.innerHTML=`<div class="mapwrap"><div class="mapbox">${live}</div>
     <div class="detailmap" id="mapDetail"></div></div>
     <div class="section" id="mapClickBlock">
-      <h2>지번/건축물 정보 — 지도를 클릭하면 표시됩니다</h2>
+      <h2>지번/건축물 정보 — 지도를 우클릭하면 표시됩니다</h2>
       <p class="footer-note">선택 기능 · run_server_api.py 실행 중일 때만 동작합니다.</p>
       <div id="mapClickResult"></div>
     </div>`;
