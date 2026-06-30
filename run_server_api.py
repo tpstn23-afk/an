@@ -254,6 +254,22 @@ def shape_info_from_geojson(geometry):
     return short_w, long_w, compact
 
 
+class VWorldResponseError(Exception):
+    """VWorld가 JSON을 기대한 자리에 빈 응답/HTML 등 다른 걸 돌려준 경우.
+    원본 응답 일부를 같이 담아서, 화면에 정확한 원인(키 오류/도메인 불일치/
+    서비스 점검 등)이 보이게 합니다."""
+    pass
+
+
+def _json_get(url):
+    raw = _get(url)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        snippet = raw.strip()[:300] if raw else "(빈 응답)"
+        raise VWorldResponseError("VWorld가 JSON이 아닌 응답을 반환했습니다: {}".format(snippet))
+
+
 def find_parcel_by_address_text(addr):
     """
     지오코더(geocode_address)는 표기에 민감해서 흔히 실패합니다.
@@ -266,12 +282,9 @@ def find_parcel_by_address_text(addr):
         service="data", request="GetFeature", data="LP_PA_CBND_BUBUN",
         key=VWORLD_KEY, domain=VWORLD_DOMAIN, format="json",
         attrFilter="addr:like:{}".format(addr), size="10", geometry="true")
-    try:
-        data = json.loads(_get(url))
-        fc = data.get("response", {}).get("result", {}).get("featureCollection", {})
-        feats = fc.get("features") or []
-    except Exception:
-        return None
+    data = _json_get(url)
+    fc = data.get("response", {}).get("result", {}).get("featureCollection", {})
+    feats = fc.get("features") or []
     if not feats:
         return None
     feats.sort(key=lambda f: len(f.get("properties", {}).get("addr", "")), reverse=True)
@@ -286,19 +299,23 @@ def find_parcel_by_address_text(addr):
 
 
 def geocode_address(addr):
+    last_err = None
     for addr_type in ("PARCEL", "ROAD"):
         url = ADDR_BASE + "?" + _qs(
             service="address", request="getcoord", crs="epsg:4326",
             address=addr, format="json", type=addr_type,
             key=VWORLD_KEY, domain=VWORLD_DOMAIN)
         try:
-            data = json.loads(_get(url))
-            result = data.get("response", {}).get("result")
-            if result and result.get("point"):
-                pt = result["point"]
-                return float(pt["x"]), float(pt["y"])
-        except Exception:
+            data = _json_get(url)
+        except VWorldResponseError as e:
+            last_err = e
             continue
+        result = data.get("response", {}).get("result")
+        if result and result.get("point"):
+            pt = result["point"]
+            return float(pt["x"]), float(pt["y"])
+    if last_err:
+        raise last_err
     return None
 
 
@@ -308,7 +325,7 @@ def get_parcel_by_point(x, y, buf_deg=0.0006):
         SERVICE="WFS", REQUEST="GetFeature", TYPENAME="lp_pa_cbnd_bubun",
         VERSION="1.1.0", MAXFEATURES="1", SRSNAME="EPSG:4326", OUTPUT="json",
         BBOX=bbox, KEY=VWORLD_KEY, DOMAIN=VWORLD_DOMAIN)
-    data = json.loads(_get(url))
+    data = _json_get(url)
     feats = data.get("features") or []
     if not feats:
         return None
@@ -559,7 +576,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "run_server_api.py 의 VWORLD_KEY가 아직 설정되지 않았습니다."}, 500)
             return
         try:
-            parcel = find_parcel_by_address_text(addr)
+            try:
+                parcel = find_parcel_by_address_text(addr)
+            except VWorldResponseError:
+                parcel = None  # 텍스트검색 실패시 좌표변환 경로로 폴백
             if not parcel or not parcel.get("pnu"):
                 xy = geocode_address(addr)
                 if not xy:
