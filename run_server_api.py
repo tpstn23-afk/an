@@ -15,8 +15,9 @@
 # 같은 데모도 화면엔 그냥 웹페이지처럼 보이지만 뒤에 localhost 서버가 있는 것과
 # 동일한 이유) 이 파이썬 서버가 대신 호출합니다.
 #
-# 계산 가능한 점수: 소유(7)+작업장(6)+관리시설(3) = 16점
-#   - 지장물(10점)·철도(5점)·보상난이도(4점)은 보안/현장조사 사유로 자동계산하지 않습니다.
+# 계산 가능한 점수: 소유(7)+작업장(6)+보상난이도(4)+관리시설(3) = 20점
+#   - 대형 지장물(6)·철도/GTX(5)·일반 지장물 이설성(4) = 15점은 보안/현장조사
+#     사유로 자동계산하지 않습니다(35점 만점 중 20점만 자동화).
 # =====================================================
 
 import http.server
@@ -32,13 +33,13 @@ import os as _os  # PORT/VWORLD_KEY를 환경변수로 받기 위함(렌더 등 
 
 PORT = int(_os.environ.get("PORT", "8000"))  # 렌더는 자체 포트를 PORT 환경변수로 내려줌
 
-# ===================== 여기만 채우세요 (로컬 실행용 기본값) =====================
-# 배포 환경(렌더 등)에서는 이 값을 코드에 직접 쓰지 말고, 그 서비스의
-# Environment Variables 설정에서 VWORLD_KEY / VWORLD_DOMAIN 을 등록하세요.
-# 환경변수가 있으면 그 값을 우선 사용하고, 없으면 아래 기본값(로컬 테스트용)을 씁니다.
-VWORLD_KEY = _os.environ.get("VWORLD_KEY", "여기에 발급받은 VWorld 인증키")   # https://www.vworld.kr/dev/v4dv_apikey_s001.do
-VWORLD_DOMAIN = _os.environ.get("VWORLD_DOMAIN", "")                          # 키 발급시 등록한 도메인. 없으면 빈 문자열 유지
-VWORLD_STDR_YEAR = _os.environ.get("VWORLD_STDR_YEAR", "2026")                # 토지특성정보/개별공시지가 기준년도(숫자4자리)
+# ===================== VWorld 키 =====================
+# 아래 기본값에 미리 채워뒀습니다. 그대로 로컬/사내 서버에서 쓰셔도 되고,
+# 렌더 등 외부에 올릴 때는 코드에 키가 그대로 남지 않게 그 서비스의
+# Environment Variables에서 VWORLD_KEY를 등록하면 그 값이 우선 적용됩니다.
+VWORLD_KEY = _os.environ.get("VWORLD_KEY", "6E04D553-6470-371C-A5BB-09744CB402A6")
+VWORLD_DOMAIN = _os.environ.get("VWORLD_DOMAIN", "101.79.31.238")  # VWorld 키 발급시 등록한 서비스URL
+VWORLD_STDR_YEAR = _os.environ.get("VWORLD_STDR_YEAR", "2026")     # 토지특성정보/개별공시지가 기준년도(숫자4자리)
 # ============================================================
 
 NED_BASE = "https://api.vworld.kr/ned/data"
