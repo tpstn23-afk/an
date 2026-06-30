@@ -319,17 +319,86 @@ def geocode_address(addr):
     return None
 
 
+def _point_in_ring(x, y, ring):
+    """레이캐스팅으로 점이 폴리곤 외곽선(ring) 안에 있는지 판정."""
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi + 1e-15) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _point_in_geometry(x, y, geometry):
+    if not geometry:
+        return False
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if gtype == "Polygon":
+        if not coords:
+            return False
+        if not _point_in_ring(x, y, coords[0]):
+            return False
+        for hole in coords[1:]:
+            if _point_in_ring(x, y, hole):
+                return False
+        return True
+    if gtype == "MultiPolygon":
+        return any(_point_in_geometry(x, y, {"type": "Polygon", "coordinates": poly}) for poly in (coords or []))
+    return False
+
+
+def _ring_centroid(ring):
+    sx = sum(p[0] for p in ring)
+    sy = sum(p[1] for p in ring)
+    n = len(ring) or 1
+    return sx / n, sy / n
+
+
+def _geometry_centroid(geometry):
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if gtype == "Polygon" and coords:
+        return _ring_centroid(coords[0])
+    if gtype == "MultiPolygon" and coords:
+        return _ring_centroid(coords[0][0])
+    return None
+
+
 def get_parcel_by_point(x, y, buf_deg=0.0006):
+    """
+    좌표(x,y) 인근 필지들을 WFS bbox로 여러 개 받아온 뒤, 그중 실제로 그 점을
+    포함하는 필지를 골라 반환합니다. 예전엔 bbox 안에서 그냥 첫 번째 결과를
+    썼는데, 그게 클릭한 자리가 아닌 옆 필지로 잘못 잡히는 원인이었습니다.
+    포함하는 필지가 하나도 없으면(드물게 경계선/도로 위 클릭 등) 중심점이
+    가장 가까운 필지로 대체합니다.
+    """
     bbox = "{},{},{},{}".format(x - buf_deg, y - buf_deg, x + buf_deg, y + buf_deg)
     url = WFS_BASE + "?" + _qs(
         SERVICE="WFS", REQUEST="GetFeature", TYPENAME="lp_pa_cbnd_bubun",
-        VERSION="1.1.0", MAXFEATURES="1", SRSNAME="EPSG:4326", OUTPUT="json",
+        VERSION="1.1.0", MAXFEATURES="30", SRSNAME="EPSG:4326", OUTPUT="json",
         BBOX=bbox, KEY=VWORLD_KEY, DOMAIN=VWORLD_DOMAIN)
     data = _json_get(url)
     feats = data.get("features") or []
     if not feats:
         return None
-    f = feats[0]
+
+    containing = [f for f in feats if _point_in_geometry(x, y, f.get("geometry"))]
+    if containing:
+        f = containing[0]
+    else:
+        # 포함하는 필지가 없으면(도로/경계 등) 중심점이 가장 가까운 필지로 대체
+        def dist(f):
+            c = _geometry_centroid(f.get("geometry") or {})
+            if not c:
+                return float("inf")
+            return (c[0] - x) ** 2 + (c[1] - y) ** 2
+        f = min(feats, key=dist)
+
     props = f.get("properties", {})
     return {
         "pnu": props.get("pnu", ""),
@@ -527,6 +596,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if parsed.path == "/api/search":
             self._handle_search(parsed)
             return
+        if parsed.path == "/api/pnu":
+            self._handle_pnu(parsed)
+            return
         if parsed.path == "/api/parcel":
             self._handle_parcel(parsed)
             return
@@ -537,6 +609,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _key_ok(self):
         return bool(VWORLD_KEY) and "여기에" not in VWORLD_KEY
+
+    def _handle_pnu(self, parsed):
+        # 클릭 좌표 -> PNU만 가볍게 조회(토지/건축물 정보는 안 부름). 이미 QGIS에서
+        # 평가해둔 후보(DATA)에 이 PNU가 있으면 그 결과를 그대로 쓰고, 없을 때만
+        # /api/parcel 로 VWorld 풀조회 하도록 화면 쪽에서 분기합니다.
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            lon = float(qs.get("lon", [""])[0])
+            lat = float(qs.get("lat", [""])[0])
+        except (TypeError, ValueError):
+            self._send_json({"error": "lon/lat 파라미터가 올바르지 않습니다."}, 400)
+            return
+        if not self._key_ok():
+            self._send_json({"error": "run_server_api.py 의 VWORLD_KEY가 아직 설정되지 않았습니다."}, 500)
+            return
+        try:
+            parcel = get_parcel_by_point(lon, lat)
+            if not parcel or not parcel.get("pnu"):
+                self._send_json({"error": "해당 위치의 필지를 찾지 못했습니다(도로/하천 등일 수 있음)."}, 404)
+                return
+            pnu = re.sub(r"\D", "", parcel["pnu"])
+            self._send_json({"pnu": pnu, "jibun": parcel.get("jibun"), "addr": parcel.get("addr")}, 200)
+        except Exception as e:
+            self._send_json({"error": "서버 처리 중 오류: {}".format(e)}, 500)
 
     def _handle_parcel(self, parsed):
         # 카카오맵 클릭 좌표로 바로 필지를 찾습니다(주소 텍스트 변환 단계가 없어
@@ -559,9 +655,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             pnu = re.sub(r"\D", "", parcel["pnu"])
             land = fetch_land(pnu)
             building = fetch_building(pnu)
+            score = score_site(land, building, parcel.get("geometry"))
             self._send_json({
                 "pnu": pnu, "jibun": parcel.get("jibun"), "addr": parcel.get("addr"),
-                "land": land, "building": building,
+                "land": land, "building": building, "score": score,
             }, 200)
         except Exception as e:
             self._send_json({"error": "서버 처리 중 오류: {}".format(e)}, 500)
